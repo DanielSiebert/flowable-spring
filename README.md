@@ -104,4 +104,4 @@ Only completed runs with a full result set can be re-evaluated. Java computes th
 
 Tests use a temporary **file** H2 database, real Spring contexts, real deployed BPMN and real Flowable workers. The parallel test uses a two-party barrier inside P2/P3, so a serialized executor cannot pass. No mocked runtime or manual shortcut substitutes for engine execution. Tests also cover retry isolation, exhausted retries and requeue, concurrent request deduplication, findings, re-evaluation, and restart recovery.
 
-See [docs/evaluation.md](docs/evaluation.md) for measured results, architectural tradeoffs and recommendation.
+See [docs/evaluation.md](docs/evaluation_c1_detailed.md) for measured results, architectural tradeoffs and recommendation.
