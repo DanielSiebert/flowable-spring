@@ -1,0 +1,7 @@
+target/
+data/
+.tools/
+*.log
+
+.idea/
+.DS_Store

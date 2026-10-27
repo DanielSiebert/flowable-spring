@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:flowable="http://flowable.org/bpmn" targetNamespace="poc">
+<process id="validation" name="Dynamic staged validation" isExecutable="true">
+<startEvent id="start"/><sequenceFlow id="a" sourceRef="start" targetRef="resolve"/>
+<serviceTask id="resolve" flowable:expression="${workflowPlan.resolve(execution)}"/>
+<sequenceFlow id="b" sourceRef="resolve" targetRef="stage"/>
+<subProcess id="stage">
+<multiInstanceLoopCharacteristics isSequential="false" flowable:collection="${validators}" flowable:elementVariable="validator"/>
+<startEvent id="itemStart"/><sequenceFlow id="c" sourceRef="itemStart" targetRef="validate"/>
+<serviceTask id="validate" flowable:delegateExpression="${validationExecution}" flowable:async="true" flowable:exclusive="false">
+<extensionElements><flowable:failedJobRetryTimeCycle>R3/PT1S</flowable:failedJobRetryTimeCycle></extensionElements>
+</serviceTask>
+<sequenceFlow id="d" sourceRef="validate" targetRef="join"/>
+<serviceTask id="join" flowable:expression="${workflowPlan.joined(execution)}" flowable:async="true" flowable:exclusive="true"/>
+<sequenceFlow id="e" sourceRef="join" targetRef="itemEnd"/><endEvent id="itemEnd"/>
+</subProcess>
+<sequenceFlow id="f" sourceRef="stage" targetRef="advance"/>
+<serviceTask id="advance" flowable:expression="${workflowPlan.advance(execution)}"/>
+<sequenceFlow id="g" sourceRef="advance" targetRef="next"/><exclusiveGateway id="next" default="done"/>
+<sequenceFlow id="again" sourceRef="next" targetRef="stage"><conditionExpression xsi:type="tFormalExpression">${more}</conditionExpression></sequenceFlow>
+<sequenceFlow id="done" sourceRef="next" targetRef="end"/><endEvent id="end"/>
+</process></definitions>
