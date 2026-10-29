@@ -1,16 +1,26 @@
-package poc;
+package poc.validationprocess.api;
 
-import java.util.*;
-import org.springframework.http.*;
-import org.springframework.web.bind.annotation.*;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Set;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import poc.validationprocess.application.service.ValidationRunService;
 
 @RestController
 @RequestMapping("/api/v1/validation-runs")
 public class ValidationApi {
   private final ValidationRunService service;
 
-  public ValidationApi(ValidationRunService s) {
-    service = s;
+  public ValidationApi(ValidationRunService service) {
+    this.service = service;
   }
 
   public record StartRequest(String requestKey, Integer p3Failures, String businessFailure) {

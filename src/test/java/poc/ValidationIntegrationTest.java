@@ -19,6 +19,12 @@ import org.springframework.context.annotation.*;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
+import poc.executionplan.domain.ExecutionPlanResolver;
+import poc.validation.application.port.ValidationProbe;
+import poc.validation.domain.ExecutionAttempt;
+import poc.validationprocess.application.port.ValidationRunRepository;
+import poc.validationprocess.application.service.ValidationRunService;
+import poc.validationprocess.domain.ValidationRun;
 
 class ValidationIntegrationTest {
   static ConfigurableApplicationContext context;
@@ -505,7 +511,8 @@ class ValidationIntegrationTest {
                 "--flowable.async-executor-activate=false",
                 "--spring.main.banner-mode=off")) {
       var svc = secondJvm.getBean(ValidationRunService.class);
-      var run = secondJvm.getBean(RunRepository.class).findByRequestKey(reqKey).orElseThrow();
+      var run =
+          secondJvm.getBean(ValidationRunRepository.class).findByRequestKey(reqKey).orElseThrow();
       var midView = svc.inspect(run.id);
 
       assertThat(midView.state()).isEqualTo("RUNNING");

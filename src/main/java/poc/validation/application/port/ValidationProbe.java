@@ -1,8 +1,5 @@
-package poc;
+package poc.validation.application.port;
 
-import org.springframework.stereotype.Component;
-
-@Component
 public class ValidationProbe {
   public void afterResult(String run, String validator, int attempt) {}
 
