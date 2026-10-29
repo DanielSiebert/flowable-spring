@@ -1,6 +1,6 @@
 # Validation Cockpit – Flowable Orchestration PoC (C1)
 
-A standalone, synthetic proof of concept for orchestrating Validation Cockpit validators with **Flowable 8**. Java computes the validator plan (dependencies P1 → P2 ∥ P3 → P4). A generic BPMN process runs **each validator as its own durable async job**, with stage barriers, retries, dead-letter incidents, restart recovery and engine history. Business results, findings, idempotency and re-evaluation lineage stay in the application database.
+A standalone, synthetic proof of concept for orchestrating Validation Cockpit validators with **Flowable 8**. Java computes the validator plan (dependencies P1 → P2 ∥ P3 → P4). A generic BPMN process runs **each validator as its own durable async job**, followed by a separate async join job, with stage barriers, retries, dead-letter incidents, graceful restart continuation and engine history. Business results, findings, idempotency and re-evaluation lineage stay in the application database.
 
 No customer code or infrastructure is required. The validators are synthetic and can simulate technical failures and business findings on demand.
 
@@ -53,7 +53,7 @@ Base path: `/api/v1/validation-runs`. Every endpoint returns the full run view.
 | `POST /` | `{"requestKey": "...", "p3Failures": 0, "businessFailure": null}` | Start a run (idempotent per `requestKey`) |
 | `GET /{id}` | n/a | Inspect a run |
 | `POST /{id}/re-evaluations` | `{"requestKey": "...", "validators": ["P3"], "p3Failures": 0, "businessFailure": null}` | Selective re-evaluation as a new correlated run |
-| `POST /{id}/dead-letter-retries` | n/a | Move dead-letter jobs back to executable (3 new retries) |
+| `POST /{id}/dead-letter-retries` | n/a | Move dead-letter jobs back to executable (budget of 3 executions) |
 
 - `p3Failures` (0..100, default 0): P3 throws a technical exception on attempts 1..n.
 - `businessFailure` (validator ID): that validator returns a business finding.
@@ -73,7 +73,7 @@ Each scenario can be run by hand against a running application and is also cover
 | Business finding | `POST {"requestKey":"finding-demo","businessFailure":"P3"}` | P3 `INVALID` with a finding, no retry, P4 still runs. Outcome `INVALID` | `businessFindingDoesNotRetryOrBlockStages` |
 | Duplicate request | Repeat any `POST` with the same `requestKey` | Same run ID, also concurrently and after completion | `concurrentDuplicateRequests` |
 | Selective re-evaluation | `POST /{id}/re-evaluations {"requestKey":"demo-1-v2","validators":["P3"]}` on a completed run | New run executes P3+P4 only. P1/P2 copied with `reusedFromRun`. Original run untouched. Lineage and effective outcome updated | `selectiveReevaluation`, `restApiStartsInspectsAndReevaluates` |
-| Restart recovery | See below | Run completes after restart without rebuilding the workflow | `restartResumesCommittedPendingJob`, `twoProcessRestartResumesMidWorkflowAfterPartialStageAndFailure` |
+| Graceful restart | See below | Run completes after orderly shutdown/restart without rebuilding the workflow | `restartResumesCommittedPendingJob`, `twoProcessRestartResumesMidWorkflowAfterPartialStageAndFailure` |
 | Shared rollback | Test only | A failure after the result flush rolls back the result and the engine step together | `resultAndEngineJobRollbackTogether` |
 
 Example:
@@ -84,7 +84,7 @@ curl -s localhost:8080/api/v1/validation-runs -H 'Content-Type: application/json
 curl -s localhost:8080/api/v1/validation-runs/RUN_ID
 ```
 
-**Restart demo:**
+**Graceful restart demo:**
 
 ```sh
 ASYNC_ENABLED=false java -jar target/validation-cockpit-1.0.0.jar
@@ -94,17 +94,18 @@ java -jar target/validation-cockpit-1.0.0.jar      # same working directory
 ```
 
 Semantics to keep in mind:
+
 - Stage dependencies mean "completed", not "valid": downstream validators run even after an upstream finding.
 - The dead-letter endpoint is unauthenticated and intended for local evaluation only.
 - Re-evaluation also re-runs validators that were previously invalid, together with their dependents.
 
 ## Tests
 
-`./mvnw clean verify` runs 29 tests (latest result: 29 passed, 0 failed):
+`./mvnw clean verify` runs 29 tests: 18 unit/architecture and 11 integration tests (independent review run: 29 passed, 0 failures/errors):
 
 | Test class | Type | Covers |
 |---|---|---|
-| [`ValidationIntegrationTest`](src/test/java/poc/ValidationIntegrationTest.java) | Integration (11) | Real Spring contexts, deployed BPMN, real Flowable workers, temporary file H2. Includes a barrier-based parallelism proof, a two-JVM restart and HTTP via MockMvc |
+| [`ValidationIntegrationTest`](src/test/java/poc/ValidationIntegrationTest.java) | Integration (11) | Real Spring contexts, deployed BPMN, real Flowable workers, temporary file H2. Includes a barrier-based parallelism proof, a graceful two-JVM restart and HTTP via MockMvc |
 | [`ArchitectureTest`](src/test/java/poc/ArchitectureTest.java) | Architecture (6) | Feature/layer placement, domain purity, Flowable and JPA isolation, feature dependency direction |
 | [`ExecutionPlanResolverUnitTest`](src/test/java/poc/executionplan/domain/ExecutionPlanResolverUnitTest.java) | Unit (5) | Stages, dependent closure, invalid input, cycle detection |
 | [`ValidatorExecutionServiceUnitTest`](src/test/java/poc/validation/application/service/ValidatorExecutionServiceUnitTest.java) | Unit (4) | Idempotency guard, findings, technical failure audit |
@@ -114,7 +115,7 @@ The logs contain expected stack traces from synthetic failures and from the losi
 
 ## Limitations
 
-This is an evaluation PoC, not a production service. Not covered: abrupt-crash/lock-expiry windows (only graceful restart with pending jobs was tested), multi-node operation, SQL Server, load and contention, external side-effect idempotency, request payload fingerprinting, authentication, schema migrations and history retention. See [production risks](docs/flowable-approach-comparison.md#6-production-portability--risks-flowable-implementations).
+This is an evaluation PoC, not a production service. Not covered: abrupt-crash/lock-expiry windows (only graceful restart with pending jobs was tested), multi-node operation, SQL Server, load and contention, external side-effect idempotency, request payload fingerprinting, authentication, schema migrations and history retention. Flowable 8.0.0 defaults async job locks to one hour and expired-job reset polling to one minute; the current acquisition polling settings do not shorten these. Request uniqueness does not guarantee exactly-once validator invocation or downstream effects. See [production risks](docs/flowable-approach-comparison.md#6-production-portability--risks-flowable-implementations), [resilience evidence](docs/flowable-approach-comparison.md#5-production-resilience-demonstrated-guarantees-and-outstanding-validation) and the [proposed test strategy](docs/flowable-approach-comparison.md#7-recommended-automated-resilience-test-strategy).
 
 ## Project layout
 
