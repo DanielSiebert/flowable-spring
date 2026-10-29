@@ -61,7 +61,7 @@ public class RunStarter {
       }
       // Invalid results cannot be reused as valid inputs. Re-evaluate their dependents too.
       for (var old : priorResults) {
-        if (!old.isValid()) {
+        if (!old.hasValidOutcome()) {
           selected.addAll(plans.affected(Set.of(old.validatorId)));
         }
       }

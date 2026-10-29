@@ -1,107 +1,127 @@
-# Validation Cockpit — Flowable C2 experiment
+# Validation Cockpit – Flowable Orchestration PoC (C1)
 
-Standalone synthetic PoC. Java owns validator selection, dependency planning and domain data. Flowable owns execution of **each validator**, persisted stage barriers, jobs, retries and process history. No customer code or infrastructure is required.
+A standalone, synthetic proof of concept for orchestrating Validation Cockpit validators with **Flowable 8**. Java computes the validator plan (dependencies P1 → P2 ∥ P3 → P4). A generic BPMN process runs **each validator as its own durable async job**, with stage barriers, retries, dead-letter incidents, restart recovery and engine history. Business results, findings, idempotency and re-evaluation lineage stay in the application database.
 
-## Versions and build
+No customer code or infrastructure is required. The validators are synthetic and can simulate technical failures and business findings on demand.
 
-Java **17**, Maven 3.9+, Spring Boot **4.0.2**, Flowable OSS **8.0.0**, file H2, JPA, JUnit **5.13.4**, AssertJ. Compiler release is 17; Jupiter is explicitly pinned because Boot 4 defaults to JUnit 6.
+> [!NOTE]
+> In the approach comparison this PoC is **C1** ("Flowable as reliability engine"). Earlier documents called it "C2"/"hybrid C2". That label now refers to the not-yet-built BPMN-native approach.
 
-Official compatibility evidence:
+## Documentation
 
-- [Flowable 8 release notes](https://github.com/flowable/flowable-engine/releases/tag/flowable-8.0.0): Spring 7 / Boot 4, Java 17 baseline.
-- [Release dependency BOM](https://github.com/flowable/flowable-engine/blob/flowable-8.0.0/modules/flowable-dependencies/pom.xml): Boot 4.0.2 and Spring 7.0.3.
-- [Flowable Boot documentation](https://www.flowable.com/open-source/docs/bpmn/ch05a-Spring-Boot/): Boot 4 support and process-only starter.
-- [Boot 4.0 system requirements](https://docs.spring.io/spring-boot/4.0/system-requirements.html): Java 17+.
+| Document | Contents |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Feature/package structure, hexagonal boundaries, BPMN model and variable contract, transactions, retry/recovery, status derivation, design decisions |
+| [docs/flowable-approach-comparison.md](docs/flowable-approach-comparison.md) | C0 vs. C1 vs. C2: verified evidence, effort avoided, remaining custom code, added complexity, production risks, open decision |
+
+## Technology
+
+Java **17**, Maven 3.9+ (wrapper included), Spring Boot **4.0.2** (Spring 7.0.3), Flowable OSS **8.0.0** (`flowable-spring-boot-starter-process`), Spring Data JPA / Hibernate 7.2.1, file-based H2 2.4.240, JUnit Jupiter **5.13.4** (pinned explicitly because Boot 4 defaults to JUnit 6), AssertJ, Awaitility.
+
+Compatibility references: [Flowable 8 release notes](https://github.com/flowable/flowable-engine/releases/tag/flowable-8.0.0), [Flowable release BOM](https://github.com/flowable/flowable-engine/blob/flowable-8.0.0/modules/flowable-dependencies/pom.xml), [Flowable Spring Boot docs](https://www.flowable.com/open-source/docs/bpmn/ch05a-Spring-Boot/), [Boot 4.0 system requirements](https://docs.spring.io/spring-boot/4.0/system-requirements.html).
+
+## Prerequisites
+
+- JDK 17 or newer on `JAVA_HOME`. In this workspace a Corretto 17 build is available at `.tools/amazon-corretto-17.jdk/Contents/Home` (git-ignored):
+  ```sh
+  export JAVA_HOME="$PWD/.tools/amazon-corretto-17.jdk/Contents/Home"
+  ```
+- `curl` for the examples below.
+
+## Build, test and run
 
 ```sh
-export JAVA_HOME=/path/to/jdk-17
-./mvnw clean verify
-./mvnw spring-boot:run
-# Alternatively:
+./mvnw clean verify                          # compile, run all tests, build the jar
+./mvnw spring-boot:run                       # or:
 java -jar target/validation-cockpit-1.0.0.jar
 ```
 
-For this workspace, a local Java 17 installation is also available at `.tools/amazon-corretto-17.jdk/Contents/Home` (ignored build tooling). You can use `export JAVA_HOME="$PWD/.tools/amazon-corretto-17.jdk/Contents/Home"` from the project directory.
+| Setting | Default | Purpose |
+|---|---|---|
+| `DB_URL` | `jdbc:h2:file:./data/validation;DB_CLOSE_ON_EXIT=FALSE` | Embedded file database, relative to the working directory. Only one application can open it at a time. Use the same directory across restarts |
+| `ASYNC_ENABLED` | `true` | Flowable async executor on/off (used for the restart demo) |
+| `server.port` | `8080` | Any standard Spring property can be overridden |
 
-The default database is `./data/validation.mv.db`, relative to the working directory. Use the same working directory across restarts. Override with `DB_URL`; only one application may open this embedded file database at a time. Ports and other Spring settings can be overridden normally.
+Worker concurrency comes from Boot's task executor (`spring.task.execution.pool.core-size/max-size=4`). Job acquisition polls every 100 ms. Schema auto-update is enabled for convenience; it is **not** suitable for production. Do not delete `./data` during a recovery demo.
 
-## BPMN and responsibilities
+## REST API
 
-`src/main/resources/processes/validation.bpmn20.xml` has no validator IDs or dependencies. Java dynamically topologically sorts the registry's dependency graph into stages: P1; P2+P3; P4. The process resolves this plan once, stores it as process variables, and loops over its stages.
+Base path: `/api/v1/validation-runs`. Every endpoint returns the full run view.
 
-A parallel multi-instance subprocess creates one instance per validator in the current stage. Each instance contains:
+| Method & path | Body | Purpose |
+|---|---|---|
+| `POST /` | `{"requestKey": "...", "p3Failures": 0, "businessFailure": null}` | Start a run (idempotent per `requestKey`) |
+| `GET /{id}` | n/a | Inspect a run |
+| `POST /{id}/re-evaluations` | `{"requestKey": "...", "validators": ["P3"], "p3Failures": 0, "businessFailure": null}` | Selective re-evaluation as a new correlated run |
+| `POST /{id}/dead-letter-retries` | n/a | Move dead-letter jobs back to executable (3 new retries) |
 
-1. An **async, nonexclusive** validator service task. Worker threads can execute P2 and P3 simultaneously. The configured retry cycle is `R3/PT1S` (three total failed attempts before dead letter).
-2. A separate **async, exclusive** join task. Its committed incoming boundary separates the validator transaction from multi-instance completion. Exclusive jobs serialize stage-counter updates within a process. Any optimistic locking at completion retries the no-op join rather than the validator body.
+- `p3Failures` (0..100, default 0): P3 throws a technical exception on attempts 1..n.
+- `businessFailure` (validator ID): that validator returns a business finding.
+- Status codes: `200`; `400` for invalid input (blank key, `p3Failures` out of range, unknown validator, empty re-evaluation set, original run still active or incomplete); `404` for unknown run IDs.
 
-The engine's multi-instance barrier advances the stage only when every instance ends. The Java plan adapter only resolves/advances process variables; it does not schedule validators, wait for futures, manage retries or persist a parallel workflow state machine. Successful completed instances remain committed while another validator retries. Executor thread-pool configuration and proof of actual overlap are covered by integration tests.
+The response contains `id`, `requestKey`, `originalRunId`, `processId`, `state` (`RUNNING`/`COMPLETED`/`INCIDENT`/`UNKNOWN`), `outcome` (`PENDING`/`VALID`/`INVALID`), `effectiveRunId`, `effectiveOutcome`, `correlatedRunIds`, `activities`, `results` (outcome, finding, attempt, `reusedFromRun`), `attempts` (number, timestamps, outcome, error) and `jobs` (kind `ASYNC`/`TIMER`/`DEAD_LETTER`, retries, exception). Inspection combines several engine and database queries, so poll `GET` for an eventually consistent result.
 
-## REST examples
+## Evaluation scenarios
+
+Each scenario can be run by hand against a running application and is also covered by an automated test in [`ValidationIntegrationTest`](src/test/java/poc/ValidationIntegrationTest.java).
+
+| Scenario | Request / steps | Expected result | Test |
+|---|---|---|---|
+| Normal run | `POST {"requestKey":"demo-1"}` | P1, then P2 ∥ P3, then P4. `COMPLETED`/`VALID` | `normalOrderingAndPersistence`, `actualParallelJobs` |
+| Technical retry | `POST {"requestKey":"retry-demo","p3Failures":2}` | P3 attempts: 2× `TECHNICAL_FAILURE` + `RETURNED`. TIMER job visible meanwhile. P1/P2 not repeated. P4 waits | `technicalRetryIsIndividual` |
+| Incident & recovery | `POST {"requestKey":"incident-demo","p3Failures":3}`, then `POST /{id}/dead-letter-retries` | `INCIDENT` with a DEAD_LETTER job and no P4. After requeue, P3 attempt 4 succeeds → `COMPLETED` | `exhaustedRetriesBecomeDeadLetter` |
+| Business finding | `POST {"requestKey":"finding-demo","businessFailure":"P3"}` | P3 `INVALID` with a finding, no retry, P4 still runs. Outcome `INVALID` | `businessFindingDoesNotRetryOrBlockStages` |
+| Duplicate request | Repeat any `POST` with the same `requestKey` | Same run ID, also concurrently and after completion | `concurrentDuplicateRequests` |
+| Selective re-evaluation | `POST /{id}/re-evaluations {"requestKey":"demo-1-v2","validators":["P3"]}` on a completed run | New run executes P3+P4 only. P1/P2 copied with `reusedFromRun`. Original run untouched. Lineage and effective outcome updated | `selectiveReevaluation`, `restApiStartsInspectsAndReevaluates` |
+| Restart recovery | See below | Run completes after restart without rebuilding the workflow | `restartResumesCommittedPendingJob`, `twoProcessRestartResumesMidWorkflowAfterPartialStageAndFailure` |
+| Shared rollback | Test only | A failure after the result flush rolls back the result and the engine step together | `resultAndEngineJobRollbackTogether` |
+
+Example:
 
 ```sh
-curl -s localhost:8080/api/v1/validation-runs \
-  -H 'Content-Type: application/json' \
-  -d '{"requestKey":"application-1-v1","p3Failures":0}'
-
+curl -s localhost:8080/api/v1/validation-runs -H 'Content-Type: application/json' \
+  -d '{"requestKey":"retry-demo","p3Failures":2}'
 curl -s localhost:8080/api/v1/validation-runs/RUN_ID
-
-curl -s localhost:8080/api/v1/validation-runs/RUN_ID/re-evaluations \
-  -H 'Content-Type: application/json' \
-  -d '{"requestKey":"application-1-v2","validators":["P3"]}'
 ```
 
-Responses include run/process IDs, original-run correlation, engine-derived state (`RUNNING`, `COMPLETED`, `INCIDENT`), active activities, domain results/findings, durable attempt records and jobs with remaining retries and exception messages. Poll GET for a consistent eventual result; inspection assembles several engine/repository queries and is not an atomic snapshot.
-
-`requestKey` is globally unique and represents one immutable logical request. Repeating a key returns its existing run, including after completion. A unique database constraint arbitrates concurrent creation; the loser reads the winner only after its failed transaction has rolled back. The caller must use a new key for changed input. This small PoC does not fingerprint or reject changed payloads under an existing key.
-
-## Failure and retry demonstrations
-
-Start with `{"requestKey":"retry-demo","p3Failures":2}`. P3 throws on attempts 1 and 2 and succeeds on attempt 3. Observe timer jobs and attempt outcomes with GET. P1/P2 are not repeated and P4 waits.
-
-Start with `{"requestKey":"incident-demo","p3Failures":3}`. After three failures the process remains active, P4 has no result and a dead-letter incident is exposed. This synthetic failure expires on attempt 4, so operator recovery can be demonstrated:
-
-```sh
-curl -s -X POST localhost:8080/api/v1/validation-runs/RUN_ID/dead-letter-retries
-```
-
-This invokes Flowable's dead-letter-to-executable API with three new retries. It does not reconstruct workflow progress. Real incidents need diagnosis before requeue. The endpoint is deliberately unauthenticated for local evaluation; this is not a production service.
-
-For business failure use `{"requestKey":"finding-demo","businessFailure":"P3"}`. A finding produces `INVALID`, commits normally and does not trigger technical retries. This PoC runs downstream validators even when upstream results are invalid; stage dependencies mean “completed,” not “valid.” A real product must define blocking/skipping semantics explicitly.
-
-## Restart demonstration
+**Restart demo:**
 
 ```sh
 ASYNC_ENABLED=false java -jar target/validation-cockpit-1.0.0.jar
-# POST a run and save its ID. GET shows pending ASYNC jobs, no attempts.
-# Stop the application with Ctrl-C, then restart from the same directory:
-java -jar target/validation-cockpit-1.0.0.jar
-# GET the saved ID until COMPLETED; no workflow reconstruction is needed.
+# POST a run and note its ID. GET shows pending ASYNC jobs and no attempts. Stop with Ctrl-C.
+java -jar target/validation-cockpit-1.0.0.jar      # same working directory
+# GET the ID until COMPLETED.
 ```
 
-The automated restart test closes and recreates complete Spring application contexts against the same file database, initially with acquisition disabled. It verifies durable pending-job recovery. This is a graceful restart test, not a kill-at-every-instruction crash simulation. Timer retry jobs are also engine state, but crash timing around worker locks is not exhaustively tested. After abrupt termination acquired jobs may wait for their lock timeout before recovery.
+Semantics to keep in mind:
+- Stage dependencies mean "completed", not "valid": downstream validators run even after an upstream finding.
+- The dead-letter endpoint is unauthenticated and intended for local evaluation only.
+- Re-evaluation also re-runs validators that were previously invalid, together with their dependents.
 
-Committed jobs, process variables, results and history survive. In-flight uncommitted validator/result work rolls back and can run again. Independent attempt audit records may survive even when the execution transaction does not. External side effects are **not exactly once**; use downstream idempotency tokens/outbox patterns as appropriate. A stable result key is `runId:validatorId`.
+## Tests
 
-## Persistence and transactions
+`./mvnw clean verify` runs 29 tests (latest result: 29 passed, 0 failed):
 
-Flowable and JPA use one Spring-managed datasource and transaction manager. Each async validator job has a transaction containing its domain result and engine transition to the join job. A technical exception rolls both back; Flowable records failure/retry in its own engine handling. No database transaction spans the whole workflow. Independent validator jobs hold their own transactions; slow remote calls would keep a connection/transaction open and require additional design.
+| Test class | Type | Covers |
+|---|---|---|
+| [`ValidationIntegrationTest`](src/test/java/poc/ValidationIntegrationTest.java) | Integration (11) | Real Spring contexts, deployed BPMN, real Flowable workers, temporary file H2. Includes a barrier-based parallelism proof, a two-JVM restart and HTTP via MockMvc |
+| [`ArchitectureTest`](src/test/java/poc/ArchitectureTest.java) | Architecture (6) | Feature/layer placement, domain purity, Flowable and JPA isolation, feature dependency direction |
+| [`ExecutionPlanResolverUnitTest`](src/test/java/poc/executionplan/domain/ExecutionPlanResolverUnitTest.java) | Unit (5) | Stages, dependent closure, invalid input, cycle detection |
+| [`ValidatorExecutionServiceUnitTest`](src/test/java/poc/validation/application/service/ValidatorExecutionServiceUnitTest.java) | Unit (4) | Idempotency guard, findings, technical failure audit |
+| [`ValidationRunServiceUnitTest`](src/test/java/poc/validationprocess/application/service/ValidationRunServiceUnitTest.java) | Unit (3) | Run start, re-evaluation selection/reuse, unknown runs, all without Flowable |
 
-`AttemptAudit` uses `REQUIRES_NEW` transactions to preserve synthetic attempt counts across rollback and restart. Its table has no foreign-key dependency on rows locked by the job. It is an evaluation audit/failure simulator, **not a job queue or retry scheduler**. `RETURNED` means the validator returned; it does not independently prove that the surrounding job committed. A crash can leave `STARTED`. Business results and Flowable history remain the sources for committed work.
+The logs contain expected stack traces from synthetic failures and from the losing duplicate insert.
 
-Domain result uniqueness and the existence guard provide a local idempotency safeguard. They do not promise exactly-once validator invocation under all crashes/concurrent duplicate delivery. Attempts are numbered per run/validator; the engine normally runs only one job per instance. Concurrent manual execution of the same locked job is outside the supported test setup.
+## Limitations
 
-Schema auto-update (`flowable.database-schema-update=true`, Hibernate `update`) is convenient for a disposable PoC. Production requires explicit schema upgrades, backups, retention and operational incident handling. Do not delete the data directory during a recovery demonstration.
+This is an evaluation PoC, not a production service. Not covered: abrupt-crash/lock-expiry windows (only graceful restart with pending jobs was tested), multi-node operation, SQL Server, load and contention, external side-effect idempotency, request payload fingerprinting, authentication, schema migrations and history retention. See [production risks](docs/flowable-approach-comparison.md#6-production-portability--risks-flowable-implementations).
 
-## Selective re-evaluation
+## Project layout
 
-Only completed runs with a full result set can be re-evaluated. Java computes the transitive dependent closure of requested validators; invalid prior results and their dependents are also included. Requesting P3 on an all-valid run selects P3+P4 and copies P1/P2 results into a new correlated run with provenance and zero new attempts. The original results/history remain untouched. No active process is rewound. Synthetic inputs are assumed immutable per request; input versioning and richer validity/cache rules are outside scope.
-
-## Tests and assessment
-
-```sh
-./mvnw clean verify
+```text
+src/main/java/poc/{validation,executionplan,validationprocess}/   feature packages (see docs/architecture.md)
+src/main/resources/processes/validation.bpmn20.xml                 generic staged BPMN process
+src/main/resources/application.properties                          configuration
+src/test/java/poc/                                                 integration, architecture and unit tests
+docs/                                                              architecture and approach comparison
 ```
-
-Tests use a temporary **file** H2 database, real Spring contexts, real deployed BPMN and real Flowable workers. The parallel test uses a two-party barrier inside P2/P3, so a serialized executor cannot pass. No mocked runtime or manual shortcut substitutes for engine execution. Tests also cover retry isolation, exhausted retries and requeue, concurrent request deduplication, findings, re-evaluation, and restart recovery.
-
-See [docs/evaluation.md](docs/evaluation_c1_detailed.md) for measured results, architectural tradeoffs and recommendation.

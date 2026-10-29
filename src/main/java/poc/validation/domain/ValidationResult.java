@@ -64,7 +64,7 @@ public final class ValidationResult {
         System.currentTimeMillis());
   }
 
-  public boolean isValid() {
+  public boolean hasValidOutcome() {
     return "VALID".equals(outcome);
   }
 

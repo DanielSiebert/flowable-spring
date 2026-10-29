@@ -21,6 +21,6 @@ public final class RunOutcomePolicy {
     if (!"COMPLETED".equals(state)) {
       return "PENDING";
     }
-    return runResults.stream().anyMatch(res -> !res.isValid()) ? "INVALID" : "VALID";
+    return runResults.stream().anyMatch(res -> !res.hasValidOutcome()) ? "INVALID" : "VALID";
   }
 }
